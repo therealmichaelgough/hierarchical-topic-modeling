@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # coding: utf8
 
+import codecs
 import glob
+import itertools
 import time
 import json
 import multiprocessing
@@ -16,8 +18,12 @@ from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import wordnet
 
-#PROCESSES = (multiprocessing.cpu_count() * 2) - 1
-PROCESSES = 2
+import sys
+reload(sys)
+sys.setdefaultencoding("utf-8")
+
+PROCESSES = (multiprocessing.cpu_count() * 2) - 1
+#PROCESSES = 2
 STOPWORDS_FILE = "stopwords.txt"
 
 class ArticlePreprocesser(multiprocessing.Process):
@@ -31,6 +37,9 @@ class ArticlePreprocesser(multiprocessing.Process):
             self.stopwords = _file.readlines()
 
     def run(self):
+        import sys
+        reload(sys)
+        sys.setdefaultencoding("utf-8")
         proc_name = self.name
         while True:
             article = self.task_queue.get()
@@ -39,16 +48,26 @@ class ArticlePreprocesser(multiprocessing.Process):
                 print '%s: Exiting' % proc_name
                 self.task_queue.task_done()
                 break
+
             try:
                 print '{}: processing article {}'.format(proc_name, article.id + "-" + article.title)
-            except:
-                print '{}: processing article {}'.format(proc_name, article.id)
-            article.sentence_tokenize()
-            article.tag_ner(self.ner_tagger)
-            article.tag_pos()
-            article.lemmatize(self.lemmatizer)
-            article.remove_stopwords(self.stopwords)
-            article.assemble_bow()
+
+                article.tokenize()
+                print'{} tagging ner on {}'.format(proc_name, article.title)
+                article.tag_ner(self.ner_tagger)
+                print '{} tagging pos on {}'.format(proc_name, article.title)
+                article.tag_pos()
+                print '{} lemmatize on {}'.format(proc_name, article.title)
+                article.lemmatize(self.lemmatizer)
+                print '{} remove stops on {}'.format(proc_name, article.title)
+                article.remove_stopwords(self.stopwords)
+                print '{} assemble {}'.format(proc_name, article.title)
+                article.assemble_bow()
+                print '{} done with {}'.format(proc_name, article.title)
+            except UnicodeDecodeError:
+                print '{}: unicode error on {}. aborting'.format(proc_name, article.title)
+                continue
+
             self.task_queue.task_done()
             self.result_queue.put(article)
         return
@@ -64,38 +83,39 @@ class Word:
 
 
 class Article:
-    punctuation = [',', '.', '!', '?']
+    punctuation = [',', '.', '!', '?', '(', ')']
 
     def __init__(self, filename=None, raw=None):
         self.sentences = []
         self.words = []
         self.ner = []
+        self.bow = []
         # from file:
         if filename is not None:
             self.text = raw
             self.id = filename
-            self.url = "file:///" + filename
+            self.url = u"file:///" + filename
             self.title = filename
         # from json with specific fields
         else:
             try:
                 _json = json.loads(raw)
-                self.text = _json["text"]
-                self.id = _json["id"]
-                self.url = _json["url"]
-                self.title = _json["title"]
+                self.text = _json[u"text"]
+                self.id = _json[u"id"]
+                self.url = _json[u"url"]
+                self.title = _json[u"title"]
             except ValueError:
                 raise NotAnArticle
         self.text = self.text.encode('utf-8')
         self.title = self.title.encode('utf-8')
 
     def tokenize(self):
-        self.sentences = sent_tokenize(self.text)
+        self.sentences = [x for x in sent_tokenize(self.text)]
         self.words = [[Word(w) for w in word_tokenize(sent)] for sent in self.sentences]
 
     def tag_ner(self, tagger):
         for sentence in self.words:
-            ners = (t[1] for t in tagger.tag((w.raw for w in sentence)))
+            ners = (t[1] for t in tagger.tag([w.raw for w in sentence]))
             for word, ner in zip(sentence, ners):
                 word.ner = ner
 
@@ -130,8 +150,19 @@ class Article:
                 word.stem = lemmatizer.lemmatize(word.raw, lemmatizer_pos)
 
     def assemble_bow(self):
-        pass
-
+        for sentence in self.words:
+            for label, group in itertools.groupby(sentence, lambda x: x.ner):
+                if label == 'O':
+                    for word in group:
+                        if word.raw not in Article.punctuation:
+                            self.bow.append(word.stem)
+                else:
+                    conglomerate = label + ":" + "_".join([str(g) for g in group])
+                    try:
+                        print u"found entity: {}".format(conglomerate)
+                    except:
+                        pass
+                    self.bow.append(conglomerate)
 
 class NotAnArticle(Exception):
     def __init__(self):
@@ -141,7 +172,7 @@ class NotAnArticle(Exception):
 def read_from_directory(path):
     print "reading files from glob pattern: {}".format(path)
     for filename in glob.glob(path):
-        with open(filename, 'r') as _file:
+        with codecs.open(filename, 'r', encoding='utf-8') as _file:
             for line in _file:
                 try:
                     yield Article(raw=line)
@@ -169,7 +200,7 @@ def get_NER_tagger(model_location=None, jar_location=None):
 
 def reader_process(directory, queue):
     for article in read_from_directory(directory):
-        print "reading: {}".format(article.title)
+        #print "reading: {}".format(article.title)
         queue.put(article)
     for x in xrange(PROCESSES):
         queue.put(None)
@@ -196,14 +227,14 @@ def main():
 
     # write the results as they come in
     while True:
-        try:
-            processed = out_queue.get(timeout=1)
+        #try:
+            processed = out_queue.get()
             try:
                 print 'writing processed article: {}'.format(processed.id + "-" + processed.title)
             except:
                 print 'writing processed article: {}'.format(processed.id)
             output_sqlite[processed.id] = processed
-        except (KeyboardInterrupt, Queue.Empty):
+        #except (KeyboardInterrupt, Queue.Empty) as e:
             print "exiting..."
             output_sqlite.close()
             print "program finished in {}".format(time.time() - t0)
