@@ -1,0 +1,2 @@
+from sqlitedict import SqliteDict
+

@@ -136,7 +136,7 @@ class Article:
     def remove_stopwords(self, stops):
         for sentence in self.words:
             for word in sentence[:]:
-                if word.ner=='O' and word.raw in stops:
+                if word.ner == 'O' and word.raw in stops:
                     sentence.remove(word)
 
     def lemmatize(self, lemmatizer):
@@ -178,11 +178,13 @@ class Article:
                     if len(group) == 1 and str(group[0].raw) in stopwords:
                         continue
                     conglomerate = label + ":" + "_".join([str(g.raw) for g in group if g.raw not in punctuation])
-                    if len(group) >3:
-                        print "found group of {}S:".format(label)
-                        print conglomerate
-                        print "\n"
+                    #if len(group) >3:
+                        #print "found group of {}S:".format(label)
+                        #print conglomerate
+                        #print "\n"
+                    print "found entity - {}".format(conglomerate)
                     self.bow.append(conglomerate)
+                    self.ner.append(conglomerate)
                 #elif label == 'PERSON' and len(group) > 3 and len(group) % 2 == 0:  #hacks! we have multiple first and last names prolly
                 #    print "PERSON: {}".format("_".join([w.raw for w in group]))
                         #self.bow.extend(name)
@@ -194,6 +196,7 @@ class Article:
                 #    except:
                 #        pass
                 #    self.bow.append(conglomerate)
+
 
 class NotAnArticle(Exception):
     def __init__(self):
@@ -289,5 +292,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
