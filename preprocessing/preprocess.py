@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # coding: utf8
 
+import boto3
 import codecs
 import glob
 import itertools
@@ -25,6 +26,56 @@ reload(sys)
 sys.setdefaultencoding("utf-8")
 
 STOPWORDS_FILE = "stopwords.txt"
+
+
+class ArticleStream(multiprocessing.Process):
+    def __init__(self, input, queue, processes=1):
+        multiprocessing.Process.__init__(self)
+        self.queue = queue
+        self.path = input
+        self.processes = processes
+        if input.lower().startswith("s3://"):
+            self.reader = self.read_from_s3
+        else:
+            self.reader = self.read_from_directory
+
+    def run(self):
+        for article in self.reader():
+            #print "reading: {}".format(article.title)
+            self.queue.put(article)
+        for x in xrange(self.processes):
+            self.queue.put(None)
+
+    def read_from_directory(self):
+        """convert files from a glob pattern path to Article objects. expect files containing one json object for each
+        wiki article, with specific fields indicating title, url, etc. otherwise try to infer these things from txt
+        :yield: Article objects
+        """
+        print "reading files from glob pattern: {}".format(self.path)
+        for filename in glob.glob(self.path):
+            with codecs.open(filename, 'r', encoding='utf-8') as _file:
+                for line in _file:
+                    try:
+                        yield Article(raw=line)
+                    except NotAnArticle:
+                        _file.seek(0)
+                    yield Article(filename=u"file:///" + filename, raw=_file.read())
+
+    def get_s3_keys(self):
+        client = boto3.client('s3')
+        paginator = client.get_paginator('list_objects_v2')
+        page_iterator = paginator.paginate(Bucket=self.path)
+        for page in page_iterator:
+            for item in page['Contents']:
+                yield item['Key']
+
+    def read_from_s3(self):
+        print "reading files from s3 path: {}".format(self.path)
+        for key in self.get_s3_keys():
+
+
+
+
 
 class ArticlePreprocesser(multiprocessing.Process):
     def __init__(self, task_queue, result_queue):
@@ -99,7 +150,7 @@ class Article:
         if filename is not None:
             self.text = raw.decode('utf-8')
             self.id = filename
-            self.url = u"file:///" + filename.decode('utf-8')
+            self.url = filename.decode('utf-8')
             self.title = filename
         # from json with specific fields
         else:
@@ -203,22 +254,9 @@ class NotAnArticle(Exception):
         Exception.__init__(self)
 
 
-def read_from_directory(path):
-    print "reading files from glob pattern: {}".format(path)
-    for filename in glob.glob(path):
-        with codecs.open(filename, 'r', encoding='utf-8') as _file:
-            for line in _file:
-                try:
-                    yield Article(raw=line)
-                except NotAnArticle:
-                    _file.seek(0)
-                    yield Article(filename=filename, raw=_file.read())
-
-
-
 def parse_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--corpus_directory", "-i", help="a path pattern of which files to read as input; e.g. test_data/*/*")
+    parser.add_argument("--input_path", "-i", help="a glob pattern matching local files to read as input; e.g. test_data/*/*. alternatively, an S3 path; e.g. s3://bucket-name", required=True)
     parser.add_argument("--output_sqlite", "-o")
     parser.add_argument("--processes", "-p", help="number of reader processes to use")
     return parser.parse_args()
@@ -235,29 +273,25 @@ def get_NER_tagger(model_location=None, jar_location=None):
     #return StanfordNERTagger(model_location, jar_location, encoding='utf-8')
 
 
-def reader_process(directory, queue, processes):
-    for article in read_from_directory(directory):
-        #print "reading: {}".format(article.title)
-        queue.put(article)
-    for x in xrange(processes):
-        queue.put(None)
-
-
 def main():
     t0 = time.time()
+
+    # configure from command line arguments
     args = parse_arguments()
     if args.processes is not None:
         PROCESSES = int(args.processes)
     else:
         PROCESSES = (multiprocessing.cpu_count() * 2) - 1
-    output_sqlite = SqliteDict(args.output_sqlite, autocommit=True)
+
     in_queue = multiprocessing.JoinableQueue()
+    output_sqlite = SqliteDict(args.output_sqlite, autocommit=True)
     out_queue = multiprocessing.Queue()
 
     # instantiate processes
 
     # a process to load the queue with file contents
-    reader = multiprocessing.Process(target=reader_process, args=(args.corpus_directory, in_queue, PROCESSES))
+    reader = ArticleReader(input=args.corpus_directory, queue=in_queue, processes=PROCESSES)
+    #reader = multiprocessing.Process(target=reader_process, args=(args.corpus_directory, in_queue, PROCESSES))
     reader.daemon = True
     reader.start()
 
